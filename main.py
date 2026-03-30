@@ -7,16 +7,9 @@ app = Flask(__name__)
 CORS(app)
 
 # ----------------------------------------------------------------------
-# НАСТРОЙКИ
+# ФУНКЦИИ ФОРМАТИРОВАНИЯ
 # ----------------------------------------------------------------------
-# Публичный прокси для режима "Без API" (если не задан, используется демо-текст)
-PUBLIC_PROXY_URL = os.environ.get("PUBLIC_PROXY_URL", "")
-
-# ----------------------------------------------------------------------
-# ФУНКЦИИ ФОРМАТИРОВАНИЯ ИСТОРИИ
-# ----------------------------------------------------------------------
-def format_multimodal_gemini(history):
-    """Форматирует историю для Gemini с поддержкой файлов"""
+def format_gemini(history):
     contents = []
     for msg in history:
         role = "user" if msg['role'] == 'user' else "model"
@@ -34,269 +27,102 @@ def format_multimodal_gemini(history):
             contents.append({"role": role, "parts": parts})
     return contents
 
-def format_openai_messages(history):
-    """Форматирует историю для OpenAI / DeepSeek / Mistral"""
-    messages = []
-    for msg in history:
-        role = "user" if msg['role'] == 'user' else "assistant"
-        content = msg.get('content', '')
-        messages.append({"role": role, "content": content})
-    return messages
-
-def format_claude_messages(history):
-    """Форматирует историю для Claude"""
-    messages = []
-    for msg in history:
-        role = "user" if msg['role'] == 'user' else "assistant"
-        content = msg.get('content', '')
-        messages.append({"role": role, "content": content})
-    return messages
-
-def format_perplexity_messages(history):
-    """Perplexity использует формат, похожий на OpenAI"""
-    return format_openai_messages(history)
-
-def format_grok_messages(history):
-    """Grok (xAI) использует формат, похожий на OpenAI"""
-    return format_openai_messages(history)
+def format_standard(history):
+    return [{"role": "user" if m['role'] == 'user' else "assistant", "content": m.get('content', '')} for m in history]
 
 # ----------------------------------------------------------------------
-# ОБРАБОТЧИКИ ДЛЯ КОНКРЕТНЫХ МОДЕЛЕЙ С РОТАЦИЕЙ КЛЮЧЕЙ
+# УНИВЕРСАЛЬНЫЙ РОТАТОР
 # ----------------------------------------------------------------------
-def try_gemini_keys(all_keys, start_index, history):
-    contents = format_multimodal_gemini(history)
-    for i in range(len(all_keys)):
-        idx = (start_index + i) % len(all_keys)
-        key_val = all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key_val}"
-        try:
-            resp = requests.post(url, json={"contents": contents}, timeout=60)
-            data = resp.json()
-            if resp.ok and not data.get('error'):
-                answer = data['candidates'][0]['content']['parts'][0]['text']
-                return answer, idx
-            if resp.status_code == 429:
-                continue
-        except:
-            continue
-    return None, None
-
-def try_openai_keys(all_keys, start_index, history, model="gpt-4o-mini"):
-    messages = format_openai_messages(history)
-    for i in range(len(all_keys)):
-        idx = (start_index + i) % len(all_keys)
-        key_val = all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {key_val}", "Content-Type": "application/json"}
-        payload = {"model": model, "messages": messages}
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=60)
-            data = resp.json()
-            if resp.ok and not data.get('error'):
-                answer = data['choices'][0]['message']['content']
-                return answer, idx
-            if resp.status_code == 429:
-                continue
-        except:
-            continue
-    return None, None
-
-def try_claude_keys(all_keys, start_index, history, model="claude-3-haiku-20240307"):
-    messages = format_claude_messages(history)
-    for i in range(len(all_keys)):
-        idx = (start_index + i) % len(all_keys)
-        key_val = all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": key_val,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json"
+def call_api_with_rotation(model_type, all_keys, start_index, history):
+    messages = format_standard(history)
+    
+    # Конфигурация API
+    config = {
+        "gemini": {
+            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=",
+            "type": "google"
+        },
+        "chatgpt": {
+            "url": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4o-mini",
+            "type": "openai"
+        },
+        "claude": {
+            "url": "https://api.anthropic.com/v1/messages",
+            "model": "claude-3-haiku-20240307",
+            "type": "anthropic"
+        },
+        "deepseek": {
+            "url": "https://api.deepseek.com/v1/chat/completions",
+            "model": "deepseek-chat",
+            "type": "openai"
         }
-        payload = {"model": model, "messages": messages, "max_tokens": 1024}
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=60)
-            data = resp.json()
-            if resp.ok and not data.get('error'):
-                answer = data['content'][0]['text']
-                return answer, idx
-            if resp.status_code == 429:
-                continue
-        except:
-            continue
-    return None, None
+    }
 
-def try_deepseek_keys(all_keys, start_index, history, model="deepseek-chat"):
-    messages = format_openai_messages(history)
+    cfg = config.get(model_type)
+    if not cfg:
+        return f"Модель {model_type} не настроена на бэкенде", None
+
     for i in range(len(all_keys)):
         idx = (start_index + i) % len(all_keys)
-        key_val = all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]
-        url = "https://api.deepseek.com/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {key_val}", "Content-Type": "application/json"}
-        payload = {"model": model, "messages": messages}
+        key_val = all_keys[idx]['key']
+        
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=60)
-            data = resp.json()
-            if resp.ok and not data.get('error'):
-                answer = data['choices'][0]['message']['content']
-                return answer, idx
-            if resp.status_code == 429:
-                continue
-        except:
-            continue
-    return None, None
+            if cfg['type'] == "google":
+                resp = requests.post(cfg['url'] + key_val, json={"contents": format_gemini(history)}, timeout=30)
+                data = resp.json()
+                if resp.ok:
+                    return data['candidates'][0]['content']['parts'][0]['text'], idx
+                print(f"Gemini Error (Key {idx}): {data}") # Лог в консоль Render
 
-def try_mistral_keys(all_keys, start_index, history, model="mistral-large-latest"):
-    messages = format_openai_messages(history)
-    for i in range(len(all_keys)):
-        idx = (start_index + i) % len(all_keys)
-        key_val = all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]
-        url = "https://api.mistral.ai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {key_val}", "Content-Type": "application/json"}
-        payload = {"model": model, "messages": messages}
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=60)
-            data = resp.json()
-            if resp.ok and not data.get('error'):
-                answer = data['choices'][0]['message']['content']
-                return answer, idx
-            if resp.status_code == 429:
-                continue
-        except:
-            continue
-    return None, None
+            elif cfg['type'] == "openai":
+                headers = {"Authorization": f"Bearer {key_val}"}
+                payload = {"model": cfg['model'], "messages": messages}
+                resp = requests.post(cfg['url'], headers=headers, json=payload, timeout=30)
+                if resp.ok:
+                    return resp.json()['choices'][0]['message']['content'], idx
+                print(f"OpenAI-type Error (Key {idx}): {resp.text}")
 
-def try_perplexity_keys(all_keys, start_index, history, model="llama-3.1-sonar-small-128k-online"):
-    messages = format_perplexity_messages(history)
-    for i in range(len(all_keys)):
-        idx = (start_index + i) % len(all_keys)
-        key_val = all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]
-        url = "https://api.perplexity.ai/chat/completions"
-        headers = {"Authorization": f"Bearer {key_val}", "Content-Type": "application/json"}
-        payload = {"model": model, "messages": messages}
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=60)
-            data = resp.json()
-            if resp.ok and not data.get('error'):
-                answer = data['choices'][0]['message']['content']
-                return answer, idx
-            if resp.status_code == 429:
-                continue
-        except:
-            continue
-    return None, None
+            elif cfg['type'] == "anthropic":
+                headers = {"x-api-key": key_val, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+                payload = {"model": cfg['model'], "messages": messages, "max_tokens": 1024}
+                resp = requests.post(cfg['url'], headers=headers, json=payload, timeout=30)
+                if resp.ok:
+                    return resp.json()['content'][0]['text'], idx
+                print(f"Claude Error (Key {idx}): {resp.text}")
 
-def try_grok_keys(all_keys, start_index, history, model="grok-beta"):
-    messages = format_grok_messages(history)
-    for i in range(len(all_keys)):
-        idx = (start_index + i) % len(all_keys)
-        key_val = all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]
-        url = "https://api.x.ai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {key_val}", "Content-Type": "application/json"}
-        payload = {"model": model, "messages": messages}
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=60)
-            data = resp.json()
-            if resp.ok and not data.get('error'):
-                answer = data['choices'][0]['message']['content']
-                return answer, idx
-            if resp.status_code == 429:
-                continue
-        except:
+        except Exception as e:
+            print(f"Network Error (Key {idx}): {str(e)}")
             continue
+
     return None, None
 
 # ----------------------------------------------------------------------
-# ОСНОВНОЙ ЭНДПОИНТ
+# РОУТЫ
 # ----------------------------------------------------------------------
 @app.route('/process', methods=['POST'])
 def process():
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
+    data = request.json
+    model = data.get("model")
+    history = data.get("history", [])
+    all_keys = data.get("all_keys", [])
+    current_key_id = data.get("current_key_id", 0)
 
-        model = data.get("model")
-        history = data.get("history", [])
-        no_api = data.get("no_api", False)
-        all_keys = data.get("all_keys", [])
-        current_key_id = data.get("current_key_id", 0)
+    if data.get("no_api"):
+        return jsonify({"answer": "Режим 'Без API' активен. Добавьте ключи для реальных ответов."})
 
-        # ---------- РЕЖИМ "БЕЗ API" ----------
-        if no_api:
-            if PUBLIC_PROXY_URL:
-                # Используем публичный прокси (если задан)
-                try:
-                    proxy_resp = requests.post(PUBLIC_PROXY_URL, json={"model": model, "history": history}, timeout=30)
-                    if proxy_resp.ok:
-                        return jsonify({"answer": proxy_resp.json().get("response", "Ответ от прокси")}), 200
-                except:
-                    pass
-            # Если прокси не задан или не ответил — возвращаем демо-сообщение
-            demo_message = (
-                "🔧 *Демо-режим*\n\n"
-                "Вы используете расширение без API-ключа. "
-                "Чтобы получить реальные ответы, снимите галочку «Без API» "
-                "и добавьте ключ для выбранной модели в настройках.\n\n"
-                f"Модель: {model.upper()}\n"
-                "Поддерживаемые модели с ключами:\n"
-                "• Gemini (бесплатный ключ в AI Studio)\n"
-                "• ChatGPT / Claude / DeepSeek / Mistral / Perplexity / Grok\n\n"
-                "Для работы с файлами также нужен API-ключ."
-            )
-            return jsonify({"answer": demo_message}), 200
+    if not all_keys:
+        return jsonify({"answer": "Нет доступных ключей для этой модели."}), 400
 
-        # ---------- ОБРАБОТКА С КЛЮЧАМИ ----------
-        # Определяем стартовый индекс
-        start_index = 0
-        for i, k in enumerate(all_keys):
-            if isinstance(k, dict) and k.get('id') == current_key_id:
-                start_index = i
-                break
-
-        answer = None
-        new_index = None
-
-        # Роутинг по моделям
-        if model == "gemini":
-            answer, new_index = try_gemini_keys(all_keys, start_index, history)
-        elif model == "chatgpt":
-            answer, new_index = try_openai_keys(all_keys, start_index, history)
-        elif model == "claude":
-            answer, new_index = try_claude_keys(all_keys, start_index, history)
-        elif model == "deepseek":
-            answer, new_index = try_deepseek_keys(all_keys, start_index, history)
-        elif model == "mistral":
-            answer, new_index = try_mistral_keys(all_keys, start_index, history)
-        elif model == "perplexity":
-            answer, new_index = try_perplexity_keys(all_keys, start_index, history)
-        elif model == "grok":
-            answer, new_index = try_grok_keys(all_keys, start_index, history)
-        elif model in ["poe", "kimi"]:
-            # Для Poe и Kimi нет открытого API — предлагаем использовать прямые запросы
-            answer = (
-                f"Модель {model.upper()} пока не поддерживается через бэкенд.\n\n"
-                "Вы можете использовать её, настроив в расширении прямые запросы "
-                "(поля target_url, headers, payload) через настройки бэкенда или "
-                "добавив ключ, если модель предоставляет API."
-            )
-        else:
-            answer = f"Модель {model} пока не реализована в бэкенде."
-
-        if answer is None:
-            answer = "Все ключи исчерпали лимиты или недействительны. Попробуйте позже или добавьте новые ключи."
-
-        response = {"answer": answer}
-        if new_index is not None:
-            response["rotated_to_key_id"] = new_index
-        return jsonify(response), 200
-
-    except Exception as e:
-        return jsonify({"answer": f"Ошибка сервера: {str(e)}"}), 500
+    answer, new_idx = call_api_with_rotation(model, all_keys, current_key_id, history)
+    
+    if answer:
+        return jsonify({"answer": answer, "rotated_to_key_id": new_idx})
+    return jsonify({"answer": "Все ключи исчерпаны или неверны. Проверьте логи сервера."}), 500
 
 @app.route('/')
 def health():
-    return "Backend is Live with Full Model Support and No‑API Proxy!", 200
+    return "Server is running", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
