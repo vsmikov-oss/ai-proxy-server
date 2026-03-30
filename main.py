@@ -115,3 +115,72 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+    import httpx # Убедись, что это есть в начале файла
+
+@app.post("/test_key")
+async def test_api_key(request: Request):
+    """
+    Эндпоинт для быстрой проверки валидности API-ключа для конкретной модели.
+    Возвращает статус 'ok' (зеленый) или 'error' (красный).
+    """
+    try:
+        data = await request.json()
+        model = data.get("model")
+        key = data.get("key")
+
+        if not key:
+            return {"status": "error", "message": "Ключ не предоставлен"}
+
+        headers = {"Content-Type": "application/json"}
+        url = ""
+        payload = {}
+
+        # 1. Gemini
+        if model == "gemini":
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+            payload = {"contents": [{"parts": [{"text": "hi"}]}]}
+            
+        # 2. ChatGPT (OpenAI)
+        elif model == "chatgpt":
+            url = "https://api.openai.com/v1/chat/completions"
+            headers["Authorization"] = f"Bearer {key}"
+            payload = {"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+            
+        # 3. DeepSeek
+        elif model == "deepseek":
+            url = "https://api.deepseek.com/chat/completions"
+            headers["Authorization"] = f"Bearer {key}"
+            payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+            
+        # 4. Claude (Anthropic)
+        elif model == "claude":
+            url = "https://api.anthropic.com/v1/messages"
+            headers["x-api-key"] = key
+            headers["anthropic-version"] = "2023-06-01"
+            payload = {"model": "claude-3-haiku-20240307", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]}
+
+        # 5. Mistral
+        elif model == "mistral":
+            url = "https://api.mistral.ai/v1/chat/completions"
+            headers["Authorization"] = f"Bearer {key}"
+            payload = {"model": "mistral-tiny", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+
+        else:
+            return {"status": "error", "message": "Неизвестная модель"}
+
+        # Делаем быстрый запрос к API модели
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if model == "gemini":
+                # У Гугла ключ в URL, заголовки обычные
+                response = await client.post(url, headers=headers, json=payload)
+            else:
+                response = await client.post(url, headers=headers, json=payload)
+            
+            # Если ответ успешный (200 OK)
+            if response.status_code == 200:
+                return {"status": "ok", "message": "Ключ рабочий"}
+            else:
+                return {"status": "error", "message": f"Ошибка {response.status_code}"}
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
