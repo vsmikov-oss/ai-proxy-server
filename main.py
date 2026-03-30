@@ -26,8 +26,8 @@ def format_gemini(history):
     return contents
 
 def call_gemini_api(key_val, history):
-    """Попытка вызвать Gemini через разные эндпоинты"""
-    # Настройки безопасности: отключаем блокировку контента
+    """Попытка вызвать Gemini через разные эндпоинты, включая 3.0/3.1"""
+    # Настройки безопасности: BLOCK_NONE позволяет получать ответы на любые вопросы
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -40,27 +40,40 @@ def call_gemini_api(key_val, history):
         "safetySettings": safety_settings
     }
 
-    # Список моделей и версий API для перебора
-    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    # ПРИОРИТЕТ МОДЕЛЕЙ (от новейших к стабильным)
+    # Эти модели входят в бесплатный тариф (Free Tier)
+    models_to_try = [
+        "gemini-3.1-flash-preview", # Новейшая 3.1
+        "gemini-3-flash-preview",   # Новая 3.0
+        "gemini-2.5-flash",         # Текущая стабильная
+        "gemini-1.5-flash"          # Резервная
+    ]
+    
+    # Сначала пробуем v1beta (для новых моделей), затем v1
     api_versions = ["v1beta", "v1"]
 
     for model_name in models_to_try:
         for version in api_versions:
             url = f"https://generativelanguage.googleapis.com/{version}/models/{model_name}:generateContent?key={key_val}"
             try:
+                # Ставим timeout 25 секунд, чтобы Render не разорвал соединение
                 resp = requests.post(url, json=payload, timeout=25)
+                
                 if resp.ok:
                     res_data = resp.json()
-                    return res_data['candidates'][0]['content']['parts'][0]['text'], None
-                else:
-                    err_msg = resp.json().get('error', {}).get('message', 'Unknown Error')
-                    if resp.status_code != 404: # Если не 404, значит ключ или лимит
-                        print(f"Ошибка API ({version}/{model_name}): {err_msg}")
+                    # Проверяем наличие ответа в структуре
+                    if 'candidates' in res_data and res_data['candidates']:
+                        answer = res_data['candidates'][0]['content']['parts'][0]['text']
+                        return answer, None
+                
+                # Если ошибка 429 (лимит запросов), переходим к следующему ключу сразу
+                if resp.status_code == 429:
+                    return None, "RATE_LIMIT_EXCEEDED"
+                    
             except Exception as e:
-                print(f"Ошибка соединения: {str(e)}")
                 continue
     
-    return None, "Все попытки обращения к Google API провалились. Проверьте ключ."
+    return None, "Ни одна модель не ответила. Проверьте валидность ключа."
 
 @app.route('/process', methods=['POST'])
 def process():
@@ -71,23 +84,30 @@ def process():
         history = data.get("history", [])
 
         if not all_keys:
-            return jsonify({"answer": "🔑 Ключи не найдены в расширении!"}), 400
+            return jsonify({"answer": "🔑 Ключи не найдены в расширении! Добавьте их в настройках."}), 400
 
         # Ротация ключей
         for i in range(len(all_keys)):
             idx = (start_idx + i) % len(all_keys)
-            key_val = all_keys[idx]['key'].strip()
+            # Извлекаем ключ, даже если он пришел как объект или строка
+            raw_key = all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]
+            key_val = str(raw_key).strip()
             
-            answer, error = call_gemini_api(key_val, history)
+            answer, error_code = call_gemini_api(key_val, history)
             
             if answer:
                 return jsonify({
                     "answer": answer, 
                     "rotated_to_key_id": idx
                 })
+            
+            # Если лимит превышен, цикл просто перейдет к следующему ключу idx
+            if error_code == "RATE_LIMIT_EXCEEDED":
+                print(f"Ключ {idx} исчерпал лимиты, переключаюсь...")
+                continue
         
         return jsonify({
-            "answer": "❌ Ошибка: Ни один из ключей не сработал. Проверьте лимиты в Google AI Studio или создайте новый проект."
+            "answer": "❌ Ошибка: Все ключи (Free Tier) исчерпали лимиты или невалидны. Попробуйте через минуту или создайте новый проект в AI Studio."
         }), 500
 
     except Exception as e:
@@ -95,8 +115,9 @@ def process():
 
 @app.route('/')
 def health():
-    return "AI Proxy Server is Live", 200
+    return "AI Proxy Server 3.0 Ready", 200
 
 if __name__ == "__main__":
+    # Поддержка порта для Render
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
