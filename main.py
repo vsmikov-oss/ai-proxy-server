@@ -6,62 +6,40 @@ import os
 app = Flask(__name__)
 CORS(app)
 
-# ----------------------------------------------------------------------
-# ФУНКЦИИ ФОРМАТИРОВАНИЯ
-# ----------------------------------------------------------------------
 def format_gemini(history):
     contents = []
     for msg in history:
         role = "user" if msg['role'] == 'user' else "model"
         parts = []
-        if msg.get('content'):
-            parts.append({"text": msg['content']})
+        if msg.get('content'): parts.append({"text": msg['content']})
         if msg.get('file'):
-            parts.append({
-                "inline_data": {
-                    "mime_type": msg['file']['mime_type'],
-                    "data": msg['file']['base64']
-                }
-            })
-        if parts:
-            contents.append({"role": role, "parts": parts})
+            parts.append({"inline_data": {"mime_type": msg['file']['mime_type'], "data": msg['file']['base64']}})
+        if parts: contents.append({"role": role, "parts": parts})
     return contents
 
 def format_standard(history):
     return [{"role": "user" if m['role'] == 'user' else "assistant", "content": m.get('content', '')} for m in history]
 
-# ----------------------------------------------------------------------
-# УНИВЕРСАЛЬНЫЙ РОТАТОР
-# ----------------------------------------------------------------------
 def call_api_with_rotation(model_type, all_keys, start_index, history):
     messages = format_standard(history)
     
-    # Конфигурация API
+    # Исправленные конфиги
     config = {
         "gemini": {
-            "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=",
+            # Перешли на v1 и проверили путь
+            "url": "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=",
             "type": "google"
         },
         "chatgpt": {
             "url": "https://api.openai.com/v1/chat/completions",
             "model": "gpt-4o-mini",
             "type": "openai"
-        },
-        "claude": {
-            "url": "https://api.anthropic.com/v1/messages",
-            "model": "claude-3-haiku-20240307",
-            "type": "anthropic"
-        },
-        "deepseek": {
-            "url": "https://api.deepseek.com/v1/chat/completions",
-            "model": "deepseek-chat",
-            "type": "openai"
         }
     }
 
     cfg = config.get(model_type)
     if not cfg:
-        return f"Модель {model_type} не настроена на бэкенде", None
+        return f"Модель {model_type} не поддерживается", None
 
     for i in range(len(all_keys)):
         idx = (start_index + i) % len(all_keys)
@@ -69,11 +47,21 @@ def call_api_with_rotation(model_type, all_keys, start_index, history):
         
         try:
             if cfg['type'] == "google":
+                # Пробуем стучаться в Google
                 resp = requests.post(cfg['url'] + key_val, json={"contents": format_gemini(history)}, timeout=30)
-                data = resp.json()
+                res_data = resp.json()
                 if resp.ok:
-                    return data['candidates'][0]['content']['parts'][0]['text'], idx
-                print(f"Gemini Error (Key {idx}): {data}") # Лог в консоль Render
+                    return res_data['candidates'][0]['content']['parts'][0]['text'], idx
+                
+                err_msg = res_data.get('error', {}).get('message', '')
+                print(f"Gemini Key {idx} Error: {err_msg}")
+                
+                # Если 404, пробуем альтернативный путь (v1beta)
+                if resp.status_code == 404:
+                    alt_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key_val}"
+                    resp = requests.post(alt_url, json={"contents": format_gemini(history)}, timeout=30)
+                    if resp.ok:
+                        return resp.json()['candidates'][0]['content']['parts'][0]['text'], idx
 
             elif cfg['type'] == "openai":
                 headers = {"Authorization": f"Bearer {key_val}"}
@@ -81,48 +69,37 @@ def call_api_with_rotation(model_type, all_keys, start_index, history):
                 resp = requests.post(cfg['url'], headers=headers, json=payload, timeout=30)
                 if resp.ok:
                     return resp.json()['choices'][0]['message']['content'], idx
-                print(f"OpenAI-type Error (Key {idx}): {resp.text}")
-
-            elif cfg['type'] == "anthropic":
-                headers = {"x-api-key": key_val, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
-                payload = {"model": cfg['model'], "messages": messages, "max_tokens": 1024}
-                resp = requests.post(cfg['url'], headers=headers, json=payload, timeout=30)
-                if resp.ok:
-                    return resp.json()['content'][0]['text'], idx
-                print(f"Claude Error (Key {idx}): {resp.text}")
+                print(f"OpenAI Key {idx} Error: {resp.text}")
 
         except Exception as e:
-            print(f"Network Error (Key {idx}): {str(e)}")
+            print(f"System Error: {str(e)}")
             continue
 
     return None, None
 
-# ----------------------------------------------------------------------
-# РОУТЫ
-# ----------------------------------------------------------------------
 @app.route('/process', methods=['POST'])
 def process():
-    data = request.json
-    model = data.get("model")
-    history = data.get("history", [])
-    all_keys = data.get("all_keys", [])
-    current_key_id = data.get("current_key_id", 0)
+    try:
+        data = request.json
+        model = data.get("model", "gemini")
+        all_keys = data.get("all_keys", [])
+        start_idx = data.get("current_key_id", 0)
+        history = data.get("history", [])
 
-    if data.get("no_api"):
-        return jsonify({"answer": "Режим 'Без API' активен. Добавьте ключи для реальных ответов."})
+        if not all_keys:
+            return jsonify({"answer": "Ошибка: Ключи не переданы в расширение!"}), 400
 
-    if not all_keys:
-        return jsonify({"answer": "Нет доступных ключей для этой модели."}), 400
-
-    answer, new_idx = call_api_with_rotation(model, all_keys, current_key_id, history)
-    
-    if answer:
-        return jsonify({"answer": answer, "rotated_to_key_id": new_idx})
-    return jsonify({"answer": "Все ключи исчерпаны или неверны. Проверьте логи сервера."}), 500
+        answer, new_idx = call_api_with_rotation(model, all_keys, start_idx, history)
+        
+        if answer:
+            return jsonify({"answer": answer, "rotated_to_key_id": new_idx})
+        
+        return jsonify({"answer": "❌ Ошибка: Все ключи этой модели выдают ошибку лимита или невалидны. Проверьте баланс (для OpenAI) или включен ли API (для Google)."}), 500
+    except Exception as e:
+        return jsonify({"answer": f"Критическая ошибка сервера: {str(e)}"}), 500
 
 @app.route('/')
-def health():
-    return "Server is running", 200
+def health(): return "AI Proxy Server is Live", 200
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
