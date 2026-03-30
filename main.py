@@ -7,117 +7,101 @@ app = Flask(__name__)
 CORS(app)
 
 def format_gemini(history):
-    """Форматирование истории для Gemini (текст + файлы)"""
+    """Форматирование для Google Gemini (текст + файлы)"""
     contents = []
     for msg in history:
         role = "user" if msg['role'] == 'user' else "model"
         parts = []
-        if msg.get('content'): 
-            parts.append({"text": msg['content']})
+        if msg.get('content'): parts.append({"text": msg['content']})
         if msg.get('file') and 'base64' in msg['file']:
-            parts.append({
-                "inline_data": {
-                    "mime_type": msg['file']['mime_type'], 
-                    "data": msg['file']['base64']
-                }
-            })
-        if parts: 
-            contents.append({"role": role, "parts": parts})
+            parts.append({"inline_data": {"mime_type": msg['file']['mime_type'], "data": msg['file']['base64']}})
+        if parts: contents.append({"role": role, "parts": parts})
     return contents
 
+def format_standard(history):
+    """Форматирование для OpenAI, DeepSeek, Mistral"""
+    return [{"role": "user" if m['role'] == 'user' else "assistant", "content": m.get('content', '')} for m in history]
+
+def call_openai_compatible(cfg, key_val, history):
+    """Универсальный вызов для ChatGPT/DeepSeek/etc"""
+    headers = {"Authorization": f"Bearer {key_val}", "Content-Type": "application/json"}
+    payload = {"model": cfg['model'], "messages": format_standard(history)}
+    try:
+        resp = requests.post(cfg['url'], headers=headers, json=payload, timeout=25)
+        if resp.status_code == 429: return None, "LIMIT"
+        if resp.ok: return resp.json()['choices'][0]['message']['content'], "OK"
+    except: pass
+    return None, "DEAD"
+
 def call_gemini_api(key_val, history):
-    """Попытка вызвать Gemini через разные эндпоинты, включая 3.0/3.1"""
-    # Настройки безопасности: BLOCK_NONE позволяет получать ответы на любые вопросы
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-    ]
+    """Улучшенный вызов Gemini с перебором Free Tier моделей"""
+    safety = [{"category": c, "threshold": "BLOCK_NONE"} for c in [
+        "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", 
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"
+    ]]
+    models = ["gemini-3.1-flash-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-1.5-flash"]
     
-    payload = {
-        "contents": format_gemini(history),
-        "safetySettings": safety_settings
-    }
-
-    # ПРИОРИТЕТ МОДЕЛЕЙ (от новейших к стабильным)
-    # Эти модели входят в бесплатный тариф (Free Tier)
-    models_to_try = [
-        "gemini-3.1-flash-preview", # Новейшая 3.1
-        "gemini-3-flash-preview",   # Новая 3.0
-        "gemini-2.5-flash",         # Текущая стабильная
-        "gemini-1.5-flash"          # Резервная
-    ]
-    
-    # Сначала пробуем v1beta (для новых моделей), затем v1
-    api_versions = ["v1beta", "v1"]
-
-    for model_name in models_to_try:
-        for version in api_versions:
-            url = f"https://generativelanguage.googleapis.com/{version}/models/{model_name}:generateContent?key={key_val}"
+    for model in models:
+        for ver in ["v1beta", "v1"]:
+            url = f"https://generativelanguage.googleapis.com/{ver}/models/{model}:generateContent?key={key_val}"
             try:
-                # Ставим timeout 25 секунд, чтобы Render не разорвал соединение
-                resp = requests.post(url, json=payload, timeout=25)
-                
+                resp = requests.post(url, json={"contents": format_gemini(history), "safetySettings": safety}, timeout=25)
+                if resp.status_code == 429: return None, "LIMIT"
                 if resp.ok:
-                    res_data = resp.json()
-                    # Проверяем наличие ответа в структуре
-                    if 'candidates' in res_data and res_data['candidates']:
-                        answer = res_data['candidates'][0]['content']['parts'][0]['text']
-                        return answer, None
-                
-                # Если ошибка 429 (лимит запросов), переходим к следующему ключу сразу
-                if resp.status_code == 429:
-                    return None, "RATE_LIMIT_EXCEEDED"
-                    
-            except Exception as e:
-                continue
-    
-    return None, "Ни одна модель не ответила. Проверьте валидность ключа."
+                    data = resp.json()
+                    if 'candidates' in data:
+                        return data['candidates'][0]['content']['parts'][0]['text'], "OK"
+            except: continue
+    return None, "DEAD"
 
 @app.route('/process', methods=['POST'])
 def process():
     try:
         data = request.json
+        model_type = data.get("model", "gemini")
         all_keys = data.get("all_keys", [])
         start_idx = data.get("current_key_id", 0)
         history = data.get("history", [])
 
         if not all_keys:
-            return jsonify({"answer": "🔑 Ключи не найдены в расширении! Добавьте их в настройках."}), 400
+            return jsonify({"answer": "🔑 Ключи не найдены в расширении!"}), 400
 
-        # Ротация ключей
+        # Конфиги для разных сетей
+        configs = {
+            "chatgpt": {"url": "https://api.openai.com/v1/chat/completions", "model": "gpt-4o-mini"},
+            "deepseek": {"url": "https://api.deepseek.com/v1/chat/completions", "model": "deepseek-chat"},
+            "mistral": {"url": "https://api.mistral.ai/v1/chat/completions", "model": "mistral-small-latest"},
+            "perplexity": {"url": "https://api.perplexity.ai/chat/completions", "model": "llama-3.1-sonar-small-128k-online"}
+        }
+
+        skipped = 0
         for i in range(len(all_keys)):
             idx = (start_idx + i) % len(all_keys)
-            # Извлекаем ключ, даже если он пришел как объект или строка
-            raw_key = all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]
-            key_val = str(raw_key).strip()
+            key_val = str(all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]).strip()
             
-            answer, error_code = call_gemini_api(key_val, history)
+            if model_type == "gemini":
+                answer, status = call_gemini_api(key_val, history)
+            elif model_type in configs:
+                answer, status = call_openai_compatible(configs[model_type], key_val, history)
+            else:
+                return jsonify({"answer": f"❌ Модель {model_type} не поддерживается сервером."}), 400
+
+            if status == "OK":
+                # Панель мониторинга в конце ответа
+                info = f"\n\n---\n🟢 **{model_type.upper()} Online** | Ключ №{idx+1}"
+                if skipped > 0: info += f" (пропущено {skipped} лимитов)"
+                
+                return jsonify({"answer": answer + info, "rotated_to_key_id": idx})
             
-            if answer:
-                return jsonify({
-                    "answer": answer, 
-                    "rotated_to_key_id": idx
-                })
-            
-            # Если лимит превышен, цикл просто перейдет к следующему ключу idx
-            if error_code == "RATE_LIMIT_EXCEEDED":
-                print(f"Ключ {idx} исчерпал лимиты, переключаюсь...")
-                continue
-        
-        return jsonify({
-            "answer": "❌ Ошибка: Все ключи (Free Tier) исчерпали лимиты или невалидны. Попробуйте через минуту или создайте новый проект в AI Studio."
-        }), 500
+            skipped += 1
+
+        return jsonify({"answer": f"🔴 **{model_type.upper()} Offline**\nВсе ключи исчерпали лимиты. Подождите минуту."}), 500
 
     except Exception as e:
-        return jsonify({"answer": f"⚙️ Системная ошибка сервера: {str(e)}"}), 500
+        return jsonify({"answer": f"⚙️ Ошибка сервера: {str(e)}"}), 500
 
 @app.route('/')
-def health():
-    return "AI Proxy Server 3.0 Ready", 200
+def health(): return "AI Hub Multi-Proxy 3.1 Ready", 200
 
 if __name__ == "__main__":
-    # Поддержка порта для Render
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
