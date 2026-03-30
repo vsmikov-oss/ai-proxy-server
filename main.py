@@ -8,16 +8,13 @@ app = Flask(__name__)
 CORS(app)
 
 def clean_text_for_speech(text):
-    """Очистка текста от мусора для аудиокниги"""
-    clean = re.sub(r'[^\w\s\d\.,!?;:-]', '', text)
-    return " ".join(clean.split())
+    return " ".join(re.sub(r'[^\w\s\d\.,!?;:-]', '', text).split())
 
 def call_gemini(key_val, history):
-    models = ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-pro"]
-    for m in models:
+    for m in ["gemini-3.1-flash-preview", "gemini-1.5-flash", "gemini-2.0-flash-exp"]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key_val}"
         try:
-            contents = [{"role": "user" if m['role'] == 'user' else "model", "parts": [{"text": m['content']}]} for m in history]
+            contents = [{"role": "user" if msg['role'] == 'user' else "model", "parts": [{"text": msg['content']}]} for msg in history]
             resp = requests.post(url, json={"contents": contents}, timeout=15)
             if resp.ok: return resp.json()['candidates'][0]['content']['parts'][0]['text'], "OK"
         except: continue
@@ -39,14 +36,12 @@ def process():
     start_idx = data.get("current_key_id", 0)
     history = data.get("history", [])
 
-    if not all_keys: return jsonify({"answer": "🔑 Нет ключей для этой модели!"}), 400
+    if not all_keys: return jsonify({"answer": f"🔑 Нет ключей для {model_type.upper()}!"}), 400
 
     skipped = 0
     for i in range(len(all_keys)):
         idx = (start_idx + i) % len(all_keys)
-        # Поддержка разных форматов ключа
-        k_obj = all_keys[idx]
-        key_val = k_obj['key'] if isinstance(k_obj, dict) else k_obj
+        key_val = str(all_keys[idx]['key'] if isinstance(all_keys[idx], dict) else all_keys[idx]).strip()
         
         answer, status = None, "ERROR"
         if model_type == "gemini":
@@ -64,7 +59,7 @@ def process():
             })
         skipped += 1
 
-    return jsonify({"answer": f"🔴 {model_type.upper()} Offline (Лимиты)"}), 500
+    return jsonify({"answer": f"🔴 {model_type.upper()} Offline (Все ключи исчерпаны)"}), 500
 
 @app.route('/')
 def health(): 
