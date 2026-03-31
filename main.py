@@ -2,49 +2,89 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import re
 
 app = Flask(__name__)
 CORS(app)
 
-# Твой DeepSeek ключ
-import os
+def clean_text_for_speech(text):
+    if not text:
+        return ""
+    return " ".join(re.sub(r'[^\w\s\d\.,!?;:-]', '', text).split())
 
-DEEPSEEK_KEY = os.environ.get("DEEPSEEK_KEY", "")
+def call_gemini(key, history, file_data=None):
+    models = ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-pro"]
+    for m in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key}"
+        try:
+            contents = []
+            for msg in history:
+                role = "user" if msg['role'] == 'user' else "model"
+                contents.append({"role": role, "parts": [{"text": msg['content']}]})
+            if file_data and contents:
+                contents[-1]["parts"].append({
+                    "inline_data": {"mime_type": file_data['mime_type'], "data": file_data['base64']}
+                })
+            resp = requests.post(url, json={"contents": contents}, timeout=20)
+            if resp.ok:
+                data = resp.json()
+                return data['candidates'][0]['content']['parts'][0]['text'], "OK"
+        except:
+            continue
+    return None, "ERROR"
+
+def call_standard(url, model, key, history):
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    messages = [{"role": "user" if m['role'] == 'user' else "assistant", "content": m['content']} for m in history]
+    try:
+        resp = requests.post(url, headers=headers, json={"model": model, "messages": messages}, timeout=20)
+        if resp.ok:
+            return resp.json()['choices'][0]['message']['content'], "OK"
+        return None, f"Status {resp.status_code}"
+    except Exception as e:
+        return None, str(e)
+
 @app.route('/process', methods=['POST'])
 def process():
-    data = request.json
-    text = data.get('text', '')
-    model = data.get('model', 'deepseek')
-
-    # Если запрос пришёл не от DeepSeek, можно вернуть заглушку или обработать
-    if model != 'deepseek':
-        return jsonify({'response': f'Этот сервер поддерживает только DeepSeek. Выберите модель DeepSeek в расширении.'}), 200
-
-    url = "https://api.deepseek.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [{"role": "user", "content": text}],
-        "max_tokens": 1000
-    }
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        data = resp.json()
-        if 'choices' in data:
-            answer = data['choices'][0]['message']['content']
-            return jsonify({'response': answer})
-        else:
-            # Если ошибка, вернём текст ошибки
-            return jsonify({'response': f'DeepSeek error: {data}'}), 200
-    except Exception as e:
-        return jsonify({'response': f'Error: {str(e)}'}), 200
+        data = request.json
+        model_type = data.get('model', 'gemini')
+        keys = data.get('all_keys', [])
+        history = data.get('history', [])
+        file_data = data.get('file')
 
-@app.route('/health')
-def health():
-    return 'ok'
+        if not keys:
+            return jsonify({"answer": "🔑 Нет ключей. Добавь их в настройках расширения!"}), 200
+
+        for key in keys:
+            key = str(key).strip()
+            if not key:
+                continue
+
+            ans, status = None, "ERROR"
+            if model_type == "gemini":
+                ans, status = call_gemini(key, history, file_data)
+            elif model_type == "chatgpt":
+                ans, status = call_standard("https://api.openai.com/v1/chat/completions", "gpt-4o-mini", key, history)
+            elif model_type == "deepseek":
+                ans, status = call_standard("https://api.deepseek.com/chat/completions", "deepseek-chat", key, history)
+            elif model_type == "mistral":
+                ans, status = call_standard("https://api.mistral.ai/v1/chat/completions", "mistral-small-latest", key, history)
+            elif model_type == "grok":
+                ans, status = call_standard("https://api.x.ai/v1/chat/completions", "grok-beta", key, history)
+            elif model_type == "kimi":
+                ans, status = call_standard("https://api.moonshot.cn/v1/chat/completions", "moonshot-v1-8k", key, history)
+
+            if status == "OK" and ans:
+                return jsonify({"answer": ans, "speech_text": clean_text_for_speech(ans)})
+
+        return jsonify({"answer": "🔴 Все ключи не сработали. Проверь баланс или лимиты."}), 200
+    except Exception as e:
+        return jsonify({"answer": f"💥 Ошибка сервера: {str(e)}"}), 500
+
+@app.route('/')
+def index():
+    return "AI HUB Proxy Ready", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
