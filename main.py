@@ -3,97 +3,74 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import re
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
 
-# ==========================================
-# УТИЛИТЫ
-# ==========================================
-
-def clean_text_for_speech(text):
+def clean_for_audio(text):
     if not text: return ""
     return " ".join(re.sub(r'[^\w\s\d\.,!?;:-]', '', text).split())
 
-# ==========================================
-# ФУНКЦИИ ВЫЗОВА МОДЕЛЕЙ
-# ==========================================
-
-def call_gemini(key_val, history, file_data=None):
-    models = ["gemini-1.5-flash", "gemini-2.0-flash-exp"]
+def call_gemini(key, history, file_data=None):
+    models = ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-pro"]
     for m in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key_val}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key}"
         try:
-            contents = []
-            for msg in history:
-                role = "user" if msg['role'] == 'user' else "model"
-                contents.append({"role": role, "parts": [{"text": msg['content']}]})
+            contents = [{"role": "user" if msg['role'] == 'user' else "model", 
+                         "parts": [{"text": msg['content']}]} for msg in history]
             if file_data and contents:
                 contents[-1]["parts"].append({
                     "inline_data": {"mime_type": file_data['mime_type'], "data": file_data['base64']}
                 })
-            resp = requests.post(url, json={"contents": contents}, timeout=15)
-            if resp.ok:
-                data = resp.json()
-                return data['candidates'][0]['content']['parts'][0]['text'], "OK"
+            r = requests.post(url, json={"contents": contents}, timeout=20)
+            if r.ok:
+                return r.json()['candidates'][0]['content']['parts'][0]['text'], "OK"
         except: continue
-    return None, "ERROR"
+    return None, "GEMINI_ERROR"
 
-def call_openai_style(url, model, key_val, history):
-    headers = {"Authorization": f"Bearer {key_val}", "Content-Type": "application/json"}
-    messages = [{"role": "user" if m['role'] == 'user' else "assistant", "content": m['content']} for m in history]
+def call_openai_style(url, model, key, history):
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    msgs = [{"role": "user" if m['role'] == 'user' else "assistant", "content": m['content']} for m in history]
     try:
-        resp = requests.post(url, headers=headers, json={"model": model, "messages": messages}, timeout=15)
-        if resp.ok:
-            return resp.json()['choices'][0]['message']['content'], "OK"
-    except: return None, "ERROR"
-
-# ==========================================
-# ЭНДПОИНТЫ
-# ==========================================
+        r = requests.post(url, headers=headers, json={"model": model, "messages": msgs}, timeout=20)
+        if r.ok: return r.json()['choices'][0]['message']['content'], "OK"
+    except: pass
+    return None, "API_ERROR"
 
 @app.route('/process', methods=['POST'])
 def process():
     try:
         data = request.json
-        model_type = data.get("model", "gemini")
-        all_keys = data.get("all_keys", [])
+        m_type = data.get("model", "gemini")
+        keys = data.get("all_keys", [])
         history = data.get("history", [])
-        file_data = data.get("file")
-        if not all_keys: return jsonify({"answer": "🔑 Ключи не найдены!"}), 400
+        file = data.get("file")
 
-        for idx, item in enumerate(all_keys):
-            key_val = str(item['key'] if isinstance(item, dict) else item).strip()
-            answer, status = None, "ERROR"
-            if model_type == "gemini": answer, status = call_gemini(key_val, history, file_data)
-            elif model_type == "chatgpt": answer, status = call_openai_style("https://api.openai.com/v1/chat/completions", "gpt-4o-mini", key_val, history)
-            elif model_type == "deepseek": answer, status = call_openai_style("https://api.deepseek.com/chat/completions", "deepseek-chat", key_val, history)
+        if not keys: return jsonify({"answer": "🔑 Нет ключей!"}), 200
+
+        for k in keys:
+            k = str(k).strip()
+            ans, status = None, "ERR"
+            if m_type == "gemini": ans, status = call_gemini(k, history, file)
+            elif m_type == "chatgpt": ans, status = call_openai_style("https://api.openai.com/v1/chat/completions", "gpt-4o-mini", k, history)
+            elif m_type == "deepseek": ans, status = call_openai_style("https://api.deepseek.com/chat/completions", "deepseek-chat", k, history)
+            elif m_type == "mistral": ans, status = call_openai_style("https://api.mistral.ai/v1/chat/completions", "mistral-small-latest", k, history)
+            elif m_type == "grok": ans, status = call_openai_style("https://api.x.ai/v1/chat/completions", "grok-beta", k, history)
+            elif m_type == "kimi": ans, status = call_openai_style("https://api.moonshot.cn/v1/chat/completions", "moonshot-v1-8k", k, history)
 
             if status == "OK":
-                return jsonify({"answer": answer, "speech_text": clean_text_for_speech(answer), "key_idx": idx})
-        return jsonify({"answer": "🔴 Ключи не сработали."}), 500
-    except Exception as e: return jsonify({"answer": str(e)}), 500
-
-@app.route('/check_key', methods=['POST'])
-def check_key():
-    """Эндпоинт для теста системы"""
-    data = request.json
-    model = data.get("model")
-    key = data.get("key")
-    # Простейшая проверка через пустой запрос
-    if model == "gemini":
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
-        res = requests.post(url, json={"contents": [{"parts": [{"text": "hi"}]}]})
-    else:
-        url = "https://api.openai.com/v1/chat/completions" if model == "chatgpt" else "https://api.deepseek.com/chat/completions"
-        headers = {"Authorization": f"Bearer {key}"}
-        res = requests.post(url, headers=headers, json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1})
-    
-    return jsonify({"status": "ok" if res.status_code == 200 else "error"})
+                return jsonify({"answer": ans, "speech_text": clean_for_audio(ans)})
+        
+        return jsonify({"answer": "🔴 Ошибка API. Проверьте ключи или баланс."}), 200
+    except Exception as e:
+        return jsonify({"answer": f"Server Error: {str(e)}"}), 500
 
 @app.route('/')
-def index(): return "AI HUB Proxy Server is Live!", 200
+def index(): return "AI HUB PROXY LIVE", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
