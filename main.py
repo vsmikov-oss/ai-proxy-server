@@ -7,8 +7,9 @@ app = Flask(__name__)
 CORS(app)
 
 # Твой DeepSeek ключ
-DEEPSEEK_KEY = "sk-b907412573b14bdd9e58d0611c1d911a"
+import os
 
+DEEPSEEK_KEY = os.environ.get("DEEPSEEK_KEY", "")
 @app.route('/process', methods=['POST'])
 def process():
     data = request.json
