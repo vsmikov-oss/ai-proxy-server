@@ -11,8 +11,9 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-def clean_for_audio(text):
+def clean_text_for_speech(text):
     if not text: return ""
+    # Убираем Markdown, чтобы озвучка не читала "звездочки"
     return " ".join(re.sub(r'[^\w\s\d\.,!?;:-]', '', text).split())
 
 def call_gemini(key, history, file_data=None):
@@ -20,8 +21,10 @@ def call_gemini(key, history, file_data=None):
     for m in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key}"
         try:
-            contents = [{"role": "user" if msg['role'] == 'user' else "model", 
-                         "parts": [{"text": msg['content']}]} for msg in history]
+            contents = []
+            for msg in history:
+                role = "user" if msg['role'] == 'user' else "model"
+                contents.append({"role": role, "parts": [{"text": msg['content']}]})
             if file_data and contents:
                 contents[-1]["parts"].append({
                     "inline_data": {"mime_type": file_data['mime_type'], "data": file_data['base64']}
@@ -30,7 +33,7 @@ def call_gemini(key, history, file_data=None):
             if r.ok:
                 return r.json()['candidates'][0]['content']['parts'][0]['text'], "OK"
         except: continue
-    return None, "GEMINI_ERROR"
+    return None, "GEMINI_ERR"
 
 def call_openai_style(url, model, key, history):
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -39,38 +42,43 @@ def call_openai_style(url, model, key, history):
         r = requests.post(url, headers=headers, json={"model": model, "messages": msgs}, timeout=20)
         if r.ok: return r.json()['choices'][0]['message']['content'], "OK"
     except: pass
-    return None, "API_ERROR"
+    return None, "API_ERR"
 
 @app.route('/process', methods=['POST'])
 def process():
     try:
         data = request.json
-        m_type = data.get("model", "gemini")
-        keys = data.get("all_keys", [])
+        model_type = data.get("model", "gemini")
+        all_keys = data.get("all_keys", [])
         history = data.get("history", [])
         file = data.get("file")
 
-        if not keys: return jsonify({"answer": "🔑 Нет ключей!"}), 200
+        if not all_keys: return jsonify({"answer": "🔑 Ошибка: Добавь ключи в настройках!"}), 200
 
-        for k in keys:
-            k = str(k).strip()
+        # Ротация ключей
+        for k_item in all_keys:
+            # Извлекаем ключ, даже если он пришел как объект или строка
+            key_val = k_item['key'] if isinstance(k_item, dict) else str(k_item)
+            key_val = key_val.strip()
+            if not key_val: continue
+
             ans, status = None, "ERR"
-            if m_type == "gemini": ans, status = call_gemini(k, history, file)
-            elif m_type == "chatgpt": ans, status = call_openai_style("https://api.openai.com/v1/chat/completions", "gpt-4o-mini", k, history)
-            elif m_type == "deepseek": ans, status = call_openai_style("https://api.deepseek.com/chat/completions", "deepseek-chat", k, history)
-            elif m_type == "mistral": ans, status = call_openai_style("https://api.mistral.ai/v1/chat/completions", "mistral-small-latest", k, history)
-            elif m_type == "grok": ans, status = call_openai_style("https://api.x.ai/v1/chat/completions", "grok-beta", k, history)
-            elif m_type == "kimi": ans, status = call_openai_style("https://api.moonshot.cn/v1/chat/completions", "moonshot-v1-8k", k, history)
+            if model_type == "gemini": ans, status = call_gemini(key_val, history, file)
+            elif model_type == "chatgpt": ans, status = call_openai_style("https://api.openai.com/v1/chat/completions", "gpt-4o-mini", key_val, history)
+            elif model_type == "deepseek": ans, status = call_openai_style("https://api.deepseek.com/chat/completions", "deepseek-chat", key_val, history)
+            elif model_type == "mistral": ans, status = call_openai_style("https://api.mistral.ai/v1/chat/completions", "mistral-small-latest", key_val, history)
+            elif model_type == "grok": ans, status = call_openai_style("https://api.x.ai/v1/chat/completions", "grok-beta", key_val, history)
 
             if status == "OK":
-                return jsonify({"answer": ans, "speech_text": clean_for_audio(ans)})
-        
-        return jsonify({"answer": "🔴 Ошибка API. Проверьте ключи или баланс."}), 200
+                return jsonify({"answer": ans, "speech_text": clean_text_for_speech(ans)})
+
+        return jsonify({"answer": "🔴 Ошибка: Все ключи этой модели не работают или лимит исчерпан."}), 200
     except Exception as e:
-        return jsonify({"answer": f"Server Error: {str(e)}"}), 500
+        logger.error(f"Error: {str(e)}")
+        return jsonify({"answer": f"💥 Ошибка сервера: {str(e)}"}), 500
 
 @app.route('/')
-def index(): return "AI HUB PROXY LIVE", 200
+def index(): return "AI HUB PROXY 3.3.5 WORKING", 200
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
