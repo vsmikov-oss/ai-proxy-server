@@ -13,6 +13,7 @@ CORS(app)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "")
+DEEPSEEK_MODEL = "deepseek/deepseek-chat"
 
 def clean_text_for_speech(text):
     if not text: return ""
@@ -59,14 +60,10 @@ def call_openrouter(history, model_name):
         r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=30)
         if r.ok:
             data = r.json()
-            used_model = data.get('model', model_name)
-            logger.info(f"OpenRouter used model: {used_model}")
             return data['choices'][0]['message']['content'], "OK"
         else:
-            logger.error(f"OpenRouter error {r.status_code}: {r.text}")
             return None, f"OPENROUTER_ERROR_{r.status_code}"
     except Exception as e:
-        logger.error(f"OpenRouter exception: {str(e)}")
         return None, str(e)
 
 @app.route('/process', methods=['POST'])
@@ -78,44 +75,35 @@ def process():
         history = data.get("history", [])
         file_data = data.get("file")
 
-        # ----- БЛОК ДЛЯ БЕСПЛАТНЫХ МОДЕЙ OPENROUTER (через серверный ключ) -----
-        # Новые модели + старые бесплатные
-        if model_type in ["qwen-36-preview", "mimo-v2", "nemotron-3", "openrouter-free", "llama-free", "qwen-free", "deepseek-free", "deepseek-v3-free"]:
+        if model_type in ["deepseek", "deepseek-free", "deepseek-v3-free", "openrouter-free", "llama-free", "qwen-free"]:
             logger.info(f"Routing {model_type} via OpenRouter")
-            if model_type == "qwen-36-preview":
-                or_model = "qwen/qwen3.6-plus-preview:free"
-            elif model_type == "mimo-v2":
-                or_model = "xiaomi/mimo-v2-pro:free"
-            elif model_type == "nemotron-3":
-                or_model = "nvidia/nemotron-3-super:free"
+            if model_type == "deepseek":
+                or_model = DEEPSEEK_MODEL
+            elif model_type == "deepseek-free":
+                or_model = "deepseek/deepseek-r1:free"
+            elif model_type == "deepseek-v3-free":
+                or_model = "deepseek/deepseek-chat-v3-0324:free"
             elif model_type == "openrouter-free":
                 or_model = "openrouter/free"
             elif model_type == "llama-free":
                 or_model = "meta-llama/llama-3.2-3b-instruct:free"
             elif model_type == "qwen-free":
                 or_model = "qwen/qwen-2.5-7b-instruct:free"
-            elif model_type == "deepseek-free":
-                or_model = "deepseek/deepseek-r1:free"
-            elif model_type == "deepseek-v3-free":
-                or_model = "deepseek/deepseek-r1:free"   # замена устаревшей модели
             else:
                 or_model = "openrouter/free"
-            
             ans, status = call_openrouter(history, or_model)
             if status == "OK" and ans:
                 return jsonify({"answer": ans, "speech_text": clean_text_for_speech(ans)})
             else:
                 return jsonify({"answer": f"🔴 OpenRouter ({or_model}): {status}"}), 200
 
-        # ----- ОСТАЛЬНЫЕ МОДЕЛИ (ротация ключей, переданных от расширения) -----
         if not all_keys:
             return jsonify({"answer": "🔑 Ошибка: Добавь ключи в настройках!"}), 200
 
         for k_item in all_keys:
             key_val = k_item['key'] if isinstance(k_item, dict) else str(k_item)
             key_val = key_val.strip()
-            if not key_val:
-                continue
+            if not key_val: continue
 
             ans, status = None, "ERR"
             if model_type == "gemini":
@@ -148,7 +136,7 @@ def health():
 
 @app.route('/')
 def index():
-    return "AI HUB PROXY 3.3.5 WORKING + New Free Models", 200
+    return "AI HUB PROXY 3.3.5 WORKING + OpenRouter Free", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
