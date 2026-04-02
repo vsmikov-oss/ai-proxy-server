@@ -92,7 +92,7 @@ def process():
             elif model_type == "deepseek-free":
                 or_model = "deepseek/deepseek-r1:free"
             elif model_type == "deepseek-v3-free":
-                or_model = "deepseek/deepseek-chat-v3-0324:free"
+                or_model = "deepseek/deepseek-r1:free"   # ИСПРАВЛЕНО: заменено на работающую модель
             else:
                 or_model = "openrouter/free"
             
