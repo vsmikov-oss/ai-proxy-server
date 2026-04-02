@@ -11,23 +11,15 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# ---------- Конфигурация OpenRouter для DeepSeek ----------
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-# Ключ OpenRouter должен быть установлен в переменной окружения на Render
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "")
-# Модель DeepSeek через OpenRouter:
-# - платная: "deepseek/deepseek-chat"
-# - бесплатная R1: "deepseek/deepseek-r1:free"
-# - бесплатная V3: "deepseek/deepseek-chat-v3-0324:free"
-DEEPSEEK_MODEL = "deepseek/deepseek-chat"   # поменяйте на :free, если хотите бесплатно
+DEEPSEEK_MODEL = "deepseek/deepseek-chat"   # можно заменить на "deepseek/deepseek-r1:free"
 
 def clean_text_for_speech(text):
     if not text: return ""
     return " ".join(re.sub(r'[^\w\s\d\.,!?;:-]', '', text).split())
 
-# ---------- Функции для прямых вызовов API (кроме DeepSeek) ----------
 def call_gemini(key, history, file_data=None):
-    # Только актуальные модели (на апрель 2026)
     models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-pro"]
     for m in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key}"
@@ -45,7 +37,7 @@ def call_gemini(key, history, file_data=None):
                 data = resp.json()
                 return data['candidates'][0]['content']['parts'][0]['text'], "OK"
             else:
-                logger.error(f"Gemini error ({m}): {resp.status_code} - {resp.text}")
+                logger.error(f"Gemini error ({m}): {resp.status_code}")
         except Exception as e:
             logger.error(f"Gemini exception ({m}): {str(e)}")
             continue
@@ -56,46 +48,29 @@ def call_openai_style(url, model, key, history):
     messages = [{"role": "user" if m['role'] == 'user' else "assistant", "content": m['content']} for m in history]
     try:
         resp = requests.post(url, headers=headers, json={"model": model, "messages": messages}, timeout=20)
-        logger.info(f"Request to {url} status: {resp.status_code}")
         if resp.ok:
             return resp.json()['choices'][0]['message']['content'], "OK"
         else:
-            logger.error(f"API error: {resp.status_code} - {resp.text}")
             return None, f"API_ERROR_{resp.status_code}"
     except Exception as e:
-        logger.error(f"Exception: {str(e)}")
         return None, str(e)
 
-# ---------- Новая функция: DeepSeek через OpenRouter ----------
-def call_deepseek_via_openrouter(history):
+def call_openrouter(history, model_name):
     if not OPENROUTER_KEY:
-        logger.error("OPENROUTER_KEY not set in environment")
         return None, "OPENROUTER_KEY_NOT_SET"
-    
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
     messages = [{"role": "user" if m['role'] == 'user' else "assistant", "content": m['content']} for m in history]
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": messages,
-        "stream": False
-    }
+    payload = {"model": model_name, "messages": messages, "stream": False}
     try:
         resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=25)
         if resp.ok:
             data = resp.json()
-            answer = data['choices'][0]['message']['content']
-            return answer, "OK"
+            return data['choices'][0]['message']['content'], "OK"
         else:
-            logger.error(f"OpenRouter error: {resp.status_code} - {resp.text}")
             return None, f"OPENROUTER_ERROR_{resp.status_code}"
     except Exception as e:
-        logger.error(f"OpenRouter exception: {str(e)}")
         return None, str(e)
 
-# ---------- Основной endpoint ----------
 @app.route('/process', methods=['POST'])
 def process():
     try:
@@ -105,16 +80,26 @@ def process():
         history = data.get('history', [])
         file_data = data.get('file')
 
-        # Особый случай: DeepSeek идёт через OpenRouter, а не через переданные ключи
-        if model_type == "deepseek":
-            logger.info("Processing DeepSeek via OpenRouter")
-            ans, status = call_deepseek_via_openrouter(history)
+        # Модели, которые идут через OpenRouter (бесплатные и deepseek)
+        if model_type in ["deepseek", "openrouter-free", "llama-free", "qwen-free"]:
+            logger.info(f"Routing {model_type} via OpenRouter")
+            if model_type == "deepseek":
+                or_model = DEEPSEEK_MODEL
+            elif model_type == "openrouter-free":
+                or_model = "openrouter/free"
+            elif model_type == "llama-free":
+                or_model = "meta-llama/llama-3.2-3b-instruct:free"
+            elif model_type == "qwen-free":
+                or_model = "qwen/qwen-2.5-7b-instruct:free"
+            else:
+                or_model = "openrouter/free"
+            ans, status = call_openrouter(history, or_model)
             if status == "OK" and ans:
                 return jsonify({"answer": ans, "speech_text": clean_text_for_speech(ans)})
             else:
-                return jsonify({"answer": f"🔴 Ошибка OpenRouter: {status}"}), 200
+                return jsonify({"answer": f"🔴 OpenRouter ({or_model}): {status}"}), 200
 
-        # Для всех остальных моделей используем классическую ротацию ключей
+        # Остальные модели требуют ключи
         if not keys:
             return jsonify({"answer": "🔑 Нет ключей. Добавь в настройках!"}), 200
 
@@ -123,7 +108,6 @@ def process():
             key = str(key).strip()
             if not key:
                 continue
-
             ans, status = None, "ERROR"
             if model_type == "gemini":
                 ans, status = call_gemini(key, history, file_data)
@@ -136,8 +120,6 @@ def process():
             elif model_type == "kimi":
                 ans, status = call_openai_style("https://api.moonshot.cn/v1/chat/completions", "moonshot-v1-8k", key, history)
             else:
-                # Если модель неизвестна (например, deepseek-free) – тоже можно пробросить в OpenRouter? 
-                # Но по заданию оставляем как ошибку.
                 return jsonify({"answer": f"Неизвестная модель для прокси: {model_type}"}), 200
 
             if status == "OK" and ans:
