@@ -11,15 +11,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# ---------- OpenRouter для бесплатных моделей ----------
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "")   # добавьте эту переменную на Render
+OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "")
 
 def clean_text_for_speech(text):
     if not text: return ""
     return " ".join(re.sub(r'[^\w\s\d\.,!?;:-]', '', text).split())
 
-# ---------- Ваши старые функции (рабочие) ----------
 def call_gemini(key, history, file_data=None):
     models = ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-pro"]
     for m in models:
@@ -51,7 +49,6 @@ def call_openai_style(url, model, key, history):
         pass
     return None, "API_ERR"
 
-# ---------- Новая функция для OpenRouter (бесплатные модели) ----------
 def call_openrouter(history, model_name):
     if not OPENROUTER_KEY:
         return None, "OPENROUTER_KEY_NOT_SET"
@@ -62,6 +59,8 @@ def call_openrouter(history, model_name):
         r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=30)
         if r.ok:
             data = r.json()
+            used_model = data.get('model', model_name)
+            logger.info(f"OpenRouter used model: {used_model}")
             return data['choices'][0]['message']['content'], "OK"
         else:
             logger.error(f"OpenRouter error {r.status_code}: {r.text}")
@@ -70,7 +69,6 @@ def call_openrouter(history, model_name):
         logger.error(f"OpenRouter exception: {str(e)}")
         return None, str(e)
 
-# ---------- Основной endpoint (гибрид) ----------
 @app.route('/process', methods=['POST'])
 def process():
     try:
@@ -80,10 +78,17 @@ def process():
         history = data.get("history", [])
         file_data = data.get("file")
 
-        # ----- БЛОК ДЛЯ БЕСПЛАТНЫХ МОДЕЙ OPENROUTER (не требуют ключей от расширения) -----
-        if model_type in ["openrouter-free", "llama-free", "qwen-free", "deepseek-free", "deepseek-v3-free"]:
+        # ----- БЛОК ДЛЯ БЕСПЛАТНЫХ МОДЕЙ OPENROUTER (через серверный ключ) -----
+        # Новые модели + старые бесплатные
+        if model_type in ["qwen-36-preview", "mimo-v2", "nemotron-3", "openrouter-free", "llama-free", "qwen-free", "deepseek-free", "deepseek-v3-free"]:
             logger.info(f"Routing {model_type} via OpenRouter")
-            if model_type == "openrouter-free":
+            if model_type == "qwen-36-preview":
+                or_model = "qwen/qwen3.6-plus-preview:free"
+            elif model_type == "mimo-v2":
+                or_model = "xiaomi/mimo-v2-pro:free"
+            elif model_type == "nemotron-3":
+                or_model = "nvidia/nemotron-3-super:free"
+            elif model_type == "openrouter-free":
                 or_model = "openrouter/free"
             elif model_type == "llama-free":
                 or_model = "meta-llama/llama-3.2-3b-instruct:free"
@@ -92,7 +97,7 @@ def process():
             elif model_type == "deepseek-free":
                 or_model = "deepseek/deepseek-r1:free"
             elif model_type == "deepseek-v3-free":
-                or_model = "deepseek/deepseek-r1:free"   # ИСПРАВЛЕНО: заменено на работающую модель
+                or_model = "deepseek/deepseek-r1:free"   # замена устаревшей модели
             else:
                 or_model = "openrouter/free"
             
@@ -102,12 +107,11 @@ def process():
             else:
                 return jsonify({"answer": f"🔴 OpenRouter ({or_model}): {status}"}), 200
 
-        # ----- ОСТАЛЬНЫЕ МОДЕЛИ (ВАША СТАРАЯ ЛОГИКА РОТАЦИИ) -----
+        # ----- ОСТАЛЬНЫЕ МОДЕЛИ (ротация ключей, переданных от расширения) -----
         if not all_keys:
             return jsonify({"answer": "🔑 Ошибка: Добавь ключи в настройках!"}), 200
 
         for k_item in all_keys:
-            # Универсальное извлечение ключа (строка или объект)
             key_val = k_item['key'] if isinstance(k_item, dict) else str(k_item)
             key_val = key_val.strip()
             if not key_val:
@@ -144,7 +148,7 @@ def health():
 
 @app.route('/')
 def index():
-    return "AI HUB PROXY 3.3.5 WORKING + OpenRouter Free", 200
+    return "AI HUB PROXY 3.3.5 WORKING + New Free Models", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
