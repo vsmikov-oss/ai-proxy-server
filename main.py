@@ -34,9 +34,9 @@ def call_gemini(key, history, file_data=None):
                 data = resp.json()
                 return data['candidates'][0]['content']['parts'][0]['text'], "OK"
             else:
-                logger.error(f"Gemini error: {resp.status_code} - {resp.text}")
+                logger.error(f"Gemini error ({m}): {resp.status_code} - {resp.text}")
         except Exception as e:
-            logger.error(f"Gemini exception: {str(e)}")
+            logger.error(f"Gemini exception ({m}): {str(e)}")
             continue
     return None, "GEMINI_ERROR"
 
