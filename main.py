@@ -16,8 +16,8 @@ def clean_text_for_speech(text):
     return " ".join(re.sub(r'[^\w\s\d\.,!?;:-]', '', text).split())
 
 def call_gemini(key, history, file_data=None):
-    # Актуальные модели Gemini (по состоянию на апрель 2026)
-    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    # Только актуальные модели (на апрель 2026)
+    models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-pro"]
     for m in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key}"
         try:
@@ -82,7 +82,6 @@ def process():
             elif model_type == "mistral":
                 ans, status = call_openai_style("https://api.mistral.ai/v1/chat/completions", "mistral-small-latest", key, history)
             elif model_type == "grok":
-                # Пробуем актуальную модель grok-1 (уточни у документации xAI)
                 ans, status = call_openai_style("https://api.x.ai/v1/chat/completions", "grok-1", key, history)
             elif model_type == "kimi":
                 ans, status = call_openai_style("https://api.moonshot.cn/v1/chat/completions", "moonshot-v1-8k", key, history)
