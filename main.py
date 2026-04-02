@@ -62,13 +62,15 @@ def call_openrouter(history, model_name):
     messages = [{"role": "user" if m['role'] == 'user' else "assistant", "content": m['content']} for m in history]
     payload = {"model": model_name, "messages": messages, "stream": False}
     try:
-        resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=25)
+        resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=30)
         if resp.ok:
             data = resp.json()
             return data['choices'][0]['message']['content'], "OK"
         else:
+            logger.error(f"OpenRouter error {resp.status_code}: {resp.text}")
             return None, f"OPENROUTER_ERROR_{resp.status_code}"
     except Exception as e:
+        logger.error(f"OpenRouter exception: {str(e)}")
         return None, str(e)
 
 @app.route('/process', methods=['POST'])
@@ -81,10 +83,14 @@ def process():
         file_data = data.get('file')
 
         # Модели, которые идут через OpenRouter (бесплатные и deepseek)
-        if model_type in ["deepseek", "openrouter-free", "llama-free", "qwen-free"]:
+        if model_type in ["deepseek", "deepseek-free", "deepseek-v3-free", "openrouter-free", "llama-free", "qwen-free"]:
             logger.info(f"Routing {model_type} via OpenRouter")
             if model_type == "deepseek":
                 or_model = DEEPSEEK_MODEL
+            elif model_type == "deepseek-free":
+                or_model = "deepseek/deepseek-r1:free"
+            elif model_type == "deepseek-v3-free":
+                or_model = "deepseek/deepseek-chat-v3-0324:free"
             elif model_type == "openrouter-free":
                 or_model = "openrouter/free"
             elif model_type == "llama-free":
